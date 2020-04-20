@@ -6,6 +6,10 @@
 
 #include <pcre.h>
 
+#ifdef HAVE_TRE_TRE_H
+    #include <tre/tre.h>
+#endif
+
 #define DEFAULT_AFTER_LEN 2
 #define DEFAULT_BEFORE_LEN 2
 #define DEFAULT_CONTEXT_LEN 2
@@ -68,6 +72,10 @@ typedef struct {
     int passthrough;
     pcre *re;
     pcre_extra *re_extra;
+#ifdef HAVE_TRE_TRE_H
+    regex_t tre;
+    regaparams_t tre_params;
+#endif
     int recurse_dirs;
     int search_all_files;
     int skip_vcs_ignores;

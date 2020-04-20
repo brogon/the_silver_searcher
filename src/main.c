@@ -11,6 +11,10 @@
 
 #include "config.h"
 
+#ifdef HAVE_TRE_TRE_H
+#include <tre/tre.h> 
+#endif
+
 #ifdef HAVE_SYS_CPUSET_H
 #include <sys/cpuset.h>
 #endif
@@ -36,6 +40,7 @@ typedef struct {
 int main(int argc, char **argv) {
     char **base_paths = NULL;
     char **paths = NULL;
+	char *version = NULL;
     int i;
     int pcre_opts = PCRE_MULTILINE;
     int study_opts = 0;
@@ -58,6 +63,10 @@ int main(int argc, char **argv) {
 
     parse_options(argc, argv, &base_paths, &paths);
     log_debug("PCRE Version: %s", pcre_version());
+#ifdef HAVE_TRE_TRE_H
+    tre_config(TRE_CONFIG_VERSION, &version);
+    log_debug("TRE Version: %s", version);
+#endif
     if (opts.stats) {
         memset(&stats, 0, sizeof(stats));
         gettimeofday(&(stats.time_start), NULL);
@@ -112,36 +121,126 @@ int main(int argc, char **argv) {
         opts.casing = is_lowercase(opts.query) ? CASE_INSENSITIVE : CASE_SENSITIVE;
     }
 
-    if (opts.literal) {
-        if (opts.casing == CASE_INSENSITIVE) {
-            /* Search routine needs the query to be lowercase */
-            char *c = opts.query;
-            for (; *c != '\0'; ++c) {
-                *c = (char)tolower(*c);
+#ifdef HAVE_TRE_TRE_H
+    if (opts.tre_params.max_cost > 0) {
+        /* If -k is specified, make the regexp literal.  This uses
+           the \Q and \E extensions. If the string already contains
+           occurrences of \E, we need to handle them separately.  This is a
+           pain, but can't really be avoided if we want to create a regexp
+           which works together with -w (see below). */
+        if (opts.literal) {
+            char *next_pos, *new_re, *new_re_end;
+            int n = 0;
+            int len;
+
+            next_pos = opts.query;
+            while (next_pos) {
+                next_pos = strstr(next_pos, "\\E");
+                if (next_pos) {
+                    n++;
+                    next_pos += 2;
+                }
             }
+
+            len = strlen(opts.query);
+            new_re = malloc(len + 5 + n * 7);
+            if (!new_re) {
+                log_err("Out of memory");
+                exit(2);
+            }
+
+            next_pos = opts.query;
+            new_re_end = new_re;
+            strcpy(new_re_end, "\\Q");
+            new_re_end += 2;
+            while (next_pos) {
+                char *start = next_pos;
+                next_pos = strstr(next_pos, "\\E");
+                if (next_pos) {
+                    strncpy(new_re_end, start, next_pos - start);
+                    new_re_end += next_pos - start;
+                    strcpy(new_re_end, "\\E\\\\E\\Q");
+                    new_re_end += 7;
+                    next_pos += 2;
+                } else {
+                    strcpy(new_re_end, start);
+                    new_re_end += strlen(start);
+                }
+            }
+            strcpy(new_re_end, "\\E");
+            free(opts.query);
+            opts.query = new_re;
+            opts.query_len = strlen(new_re);
         }
-        generate_alpha_skip(opts.query, opts.query_len, alpha_skip_lookup, opts.casing == CASE_SENSITIVE);
-        find_skip_lookup = NULL;
-        generate_find_skip(opts.query, opts.query_len, &find_skip_lookup, opts.casing == CASE_SENSITIVE);
-        generate_hash(opts.query, opts.query_len, h_table, opts.casing == CASE_SENSITIVE);
+
+        /* If -w is specified, prepend beginning-of-word and end-of-word
+           assertions to the regexp before compiling. */
         if (opts.word_regexp) {
-            init_wordchar_table();
-            opts.literal_starts_wordchar = is_wordchar(opts.query[0]);
-            opts.literal_ends_wordchar = is_wordchar(opts.query[opts.query_len - 1]);
+            char *tmp = opts.query;
+            int len = strlen(tmp);
+            opts.query = malloc(len + 7);
+            if (opts.query == NULL) {
+                log_err("Out of memory");
+                exit(2);
+            }
+            strcpy(opts.query, "\\<(");
+            strcpy(opts.query + 3, tmp);
+            strcpy(opts.query + len + 3, ")\\>");
+            free(tmp);
+        }
+
+        /* setup comparison flags */
+        int comp_flags = REG_EXTENDED;
+        if (opts.casing == CASE_INSENSITIVE) {
+            comp_flags |= REG_ICASE;
+        }
+        if ( ! opts.multiline) {
+            comp_flags |= REG_NEWLINE;
+        }
+
+        /* Compile the pattern. */
+        int errcode = tre_regcomp(&opts.tre, opts.query, comp_flags);
+        if (errcode) {
+            char errbuf[256];
+            tre_regerror(errcode, &opts.tre, errbuf, sizeof(errbuf));
+            log_err("Bad regex! tre_regcomp() failed: %s", errbuf);
+            exit(2);
         }
     } else {
-        if (opts.casing == CASE_INSENSITIVE) {
-            pcre_opts |= PCRE_CASELESS;
+#endif
+        if (opts.literal) {
+            if (opts.casing == CASE_INSENSITIVE) {
+                /* Search routine needs the query to be lowercase */
+                char *c = opts.query;
+                for (; *c != '\0'; ++c) {
+                    *c = (char)tolower(*c);
+                }
+            }
+            generate_alpha_skip(opts.query, opts.query_len, alpha_skip_lookup, opts.casing == CASE_SENSITIVE);
+            find_skip_lookup = NULL;
+            generate_find_skip(opts.query, opts.query_len, &find_skip_lookup, opts.casing == CASE_SENSITIVE);
+            generate_hash(opts.query, opts.query_len, h_table, opts.casing == CASE_SENSITIVE);
+            if (opts.word_regexp) {
+                init_wordchar_table();
+                opts.literal_starts_wordchar = is_wordchar(opts.query[0]);
+                opts.literal_ends_wordchar = is_wordchar(opts.query[opts.query_len - 1]);
+            }
+        } else {
+            if (opts.casing == CASE_INSENSITIVE) {
+                pcre_opts |= PCRE_CASELESS;
+            }
+            if (opts.word_regexp) {
+                char *word_regexp_query;
+                ag_asprintf(&word_regexp_query, "\\b(?:%s)\\b", opts.query);
+                free(opts.query);
+                opts.query = word_regexp_query;
+                opts.query_len = strlen(opts.query);
+            }
+            compile_study(&opts.re, &opts.re_extra, opts.query, pcre_opts, study_opts);
         }
-        if (opts.word_regexp) {
-            char *word_regexp_query;
-            ag_asprintf(&word_regexp_query, "\\b(?:%s)\\b", opts.query);
-            free(opts.query);
-            opts.query = word_regexp_query;
-            opts.query_len = strlen(opts.query);
-        }
-        compile_study(&opts.re, &opts.re_extra, opts.query, pcre_opts, study_opts);
+#ifdef HAVE_TRE_TRE_H
     }
+#endif
 
     if (opts.search_stream) {
         search_stream(stdin, "");

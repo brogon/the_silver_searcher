@@ -44,6 +44,76 @@ ssize_t search_buf(const char *buf, const size_t buf_len,
         matches[0].start = 0;
         matches[0].end = buf_len;
         matches_len = 1;
+#ifdef HAVE_TRE_TRE_H
+    } else if (opts.tre_params.max_cost > 0) {
+        /* we use TRE for approximate search */
+        regamatch_t match;
+        regmatch_t pmatch[1];
+        const char *line;
+        memset(&match, 0, sizeof(match));
+        match.pmatch = pmatch;
+        match.nmatch = 1;
+
+        if (opts.multiline) {
+            while (buf_offset < buf_len &&
+                   (tre_reganexec(&opts.tre, buf + buf_offset, buf_len - buf_offset, &match, opts.tre_params, 0) == REG_OK)) {
+                log_debug("Regex match found. File %s, offset %i bytes.", dir_full_path, match.pmatch[0].rm_so);
+
+                realloc_matches(&matches, &matches_size, matches_len + matches_spare);
+
+                matches[matches_len].start = buf_offset + match.pmatch[0].rm_so;
+                matches[matches_len].end = buf_offset + match.pmatch[0].rm_eo;
+                matches_len++;
+
+                buf_offset += match.pmatch[0].rm_eo;
+                if (match.pmatch[0].rm_so == match.pmatch[0].rm_eo) {
+                    ++buf_offset;
+                    log_debug("Regex match is of length zero. Advancing offset one byte.");
+                }
+
+                if (opts.max_matches_per_file > 0 && matches_len >= opts.max_matches_per_file) {
+                    log_err("Too many matches in %s. Skipping the rest of this file.", dir_full_path);
+                    break;
+                }
+            }
+        } else {
+            while (buf_offset < buf_len) {
+                size_t line_offset = 0;
+                size_t line_len = buf_getline(&line, buf, buf_len, buf_offset);
+                if (!line) {
+                    break;
+                }
+
+                while (line_offset < line_len) {
+                    int errcode = tre_reganexec(&opts.tre, line + line_offset, line_len - line_offset, &match, opts.tre_params, 0);
+                    if (errcode != REG_OK) {
+                        break;
+                    }
+
+                    size_t line_to_buf = buf_offset + line_offset;
+                    log_debug("Regex match found. File %s, offset %i bytes.", dir_full_path, line_to_buf + match.pmatch[0].rm_so);
+
+                    realloc_matches(&matches, &matches_size, matches_len + matches_spare);
+
+                    matches[matches_len].start = match.pmatch[0].rm_so + line_to_buf;
+                    matches[matches_len].end = match.pmatch[0].rm_eo + line_to_buf;
+                    matches_len++;
+
+                    line_offset += match.pmatch[0].rm_eo;
+                    if (match.pmatch[0].rm_so == match.pmatch[0].rm_eo) {
+                        ++line_offset;
+                        log_debug("Regex match is of length zero. Advancing offset one byte.");
+                    }
+
+                    if (opts.max_matches_per_file > 0 && matches_len >= opts.max_matches_per_file) {
+                        log_err("Too many matches in %s. Skipping the rest of this file.", dir_full_path);
+                        goto multiline_done;
+                    }
+                }
+                buf_offset += line_len + 1;
+            }
+        }
+#endif
     } else if (opts.literal) {
         const char *match_ptr = buf;
 

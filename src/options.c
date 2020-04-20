@@ -80,6 +80,14 @@ Output Options:\n\
   -0 --null --print0      Separate filenames with null (for 'xargs -0')\n\
 \n\
 Search Options:\n\
+");
+#ifdef HAVE_TRE_TRE_H
+    printf("\
+  -#                      Match records that have at most # errors (# is a\n\
+                          digit between 1 and 9); uses TRE regex.\n\
+");
+#endif
+    printf("\
   -a --all-types          Search all files (doesn't include hidden files\n\
                           or patterns from ignore files)\n\
   -D --debug              Ridiculous debugging (probably not useful)\n\
@@ -126,6 +134,7 @@ void print_version(void) {
     char jit = '-';
     char lzma = '-';
     char zlib = '-';
+    char tre = '-';
 
 #ifdef USE_PCRE_JIT
     jit = '+';
@@ -136,10 +145,13 @@ void print_version(void) {
 #ifdef HAVE_ZLIB_H
     zlib = '+';
 #endif
+#ifdef HAVE_TRE_TRE_H
+    tre = '+';
+#endif
 
     printf("ag version %s\n\n", PACKAGE_VERSION);
     printf("Features:\n");
-    printf("  %cjit %clzma %czlib\n", jit, lzma, zlib);
+    printf("  %cjit %clzma %czlib %ctre\n", jit, lzma, zlib, tre);
 }
 
 void init_options(void) {
@@ -167,9 +179,18 @@ void init_options(void) {
     opts.color_match = ag_strdup(color_match);
     opts.color_line_number = ag_strdup(color_line_number);
     opts.use_thread_affinity = TRUE;
+
+#ifdef HAVE_TRE_TRE_H
+    tre_regaparams_default(&opts.tre_params);
+    opts.tre_params.max_cost = 0; // "Do not use TRE"
+#endif
 }
 
 void cleanup_options(void) {
+#ifdef HAVE_TRE_TRE_H
+    tre_regfree(&opts.tre);
+#endif
+
     free(opts.color_path);
     free(opts.color_match);
     free(opts.color_line_number);
@@ -183,6 +204,7 @@ void cleanup_options(void) {
         /* Using pcre_free_study on pcre_extra* can segfault on some versions of PCRE */
         pcre_free(opts.re_extra);
     }
+
 
     if (opts.ackmate_dir_filter) {
         pcre_free(opts.ackmate_dir_filter);
@@ -229,6 +251,12 @@ void parse_options(int argc, char **argv, char **base_paths[], char **paths[]) {
     size_t num_exts = 0;
 
     init_options();
+
+#ifdef HAVE_TRE_TRE_H
+    const char *shortopts = "A:aB:C:cDG:g:FfHhiLlm:nop:QRrSsvVtuUwW:z0123456789";
+#else
+    const char *shortopts = "A:aB:C:cDG:g:FfHhiLlm:nop:QRrSsvVtuUwW:z0";
+#endif
 
     option_t base_longopts[] = {
         { "ackmate", no_argument, &opts.ackmate, 1 },
@@ -372,7 +400,7 @@ void parse_options(int argc, char **argv, char **base_paths[], char **paths[]) {
     }
 
     char *file_search_regex = NULL;
-    while ((ch = getopt_long(argc, argv, "A:aB:C:cDG:g:FfHhiLlm:nop:QRrSsvVtuUwW:z0", longopts, &opt_index)) != -1) {
+    while ((ch = getopt_long(argc, argv, shortopts, longopts, &opt_index)) != -1) {
         switch (ch) {
             case 'A':
                 if (optarg) {
@@ -590,10 +618,26 @@ void parse_options(int argc, char **argv, char **base_paths[], char **paths[]) {
                 }
 
                 log_err("option %s does not take a value", longopts[opt_index].name);
-            /* fall through */
-            default:
                 usage();
                 exit(1);
+            default:
+#ifdef HAVE_TRE_TRE_H
+	            if (ch >= '1' && ch <= '9') {
+                    if (opts.tre_params.max_cost == 0) {
+        	            opts.tre_params.max_cost = ch - '0';
+                    } else {
+                        log_err("approximation level already set (%d)", opts.tre_params.max_cost);
+                        usage();
+                        exit(1);
+                    }
+                } else { 
+                    usage();
+                    exit(1);
+                }
+#else
+                usage();
+                exit(1);
+#endif
         }
     }
 
